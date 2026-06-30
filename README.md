@@ -31,4 +31,4 @@ The overhead varies depending on the size of the allocation, but is generally lo
 
 ## Libraries
 
-B-tree from (parallel-hashmap)[https://github.com/greg7mdp/parallel-hashmap] by Gregory Popovitch 
+B-tree from [parallel-hashmap](https://github.com/greg7mdp/parallel-hashmap) by Gregory Popovitch 
