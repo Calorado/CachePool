@@ -1,0 +1,5 @@
+*.ods
+*.vcxproj*
+*.slnx
+MemoryPool/*
+x64/*
