@@ -1,5 +1,7 @@
 *.ods
 *.vcxproj*
 *.slnx
+*.py
+*.csv
 MemoryPool/*
 x64/*

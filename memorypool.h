@@ -10,6 +10,7 @@ with this file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
 #include <cstdint>
 #include <new>
+#include <type_traits>
 #include "lib/parallel_hashmap/btree.h"
 
 #define IS_64BIT (UINTPTR_MAX > UINT32_MAX)
@@ -134,75 +135,92 @@ namespace mempool {
     // - On allocation we take the top chunk from the stack, and remove it ONLY if 
     //   it becomes full.
     // - On deallocation we push the chunk into the stack ONLY if it was previously full.
-
-    const int FIXED_POOL_CHUNK_SIZE = sizeof(size_t) * 8;
     
-    template<typename LockType = NoLock>
+    template<
+        typename LockType = NoLock, 
+        bool AllocFallback = false,  // If true and no blocks are available allocate using new[], otherwise throw std::bad_alloc.
+        bool ExternalBuffer = false,  // If true the memory buffer is handled externally.
+        typename Index = size_t  // Data type to use for indexes. Limits the maximum number of blocks, but also reduces the size of the pool object.
+    >
     class FixedMemoryPool
     {
-        union {
-            uint8_t* buffer = nullptr;  // Buffer containing all blocks and metadata of the pool.
-            size_t* nonFullChunks;  // Stack with indexes for chunks that are not yet full. Always at the start of the buffer.
-        };
-        size_t* chunkBitmaps = nullptr;
-        uint8_t* blocks = nullptr;
-        
-        size_t nonFullChunkCount = 0;
-        size_t allocatedBlocks = 0;
-        size_t numberBlocks = 0;
-        size_t blockSize = 1;
-
+        uint8_t* buffer = nullptr;  // Buffer containing all blocks and metadata of the pool.        
+        Index nonFullChunkCount = 0;
+        Index allocatedBlocks = 0;
+        Index numberBlocks = 0;
+        Index blockSize = 1;
+        [[no_unique_address]]
+#ifdef _MSC_VER
+        [[msvc::no_unique_address]]  // I hate this company
+#endif
         LockType lock;
-        bool allocFallback = false;  // If true and no blocks are available allocate using new[], otherwise throw std::bad_alloc.
-        bool externalBuffer = false;  // True if the memory buffers (data, nonFullChunks, chunkBitmaps) come externally
 
         void release_buffer()
         {
-            if (!externalBuffer)
+            if (!ExternalBuffer)
                 delete[] buffer;
             buffer = nullptr;
         }
 
+        size_t get_chunk_size() const {
+            return sizeof(Index) * 8;
+        }
+
+        size_t get_number_chunks()
+        {
+            return (numberBlocks + get_chunk_size() - 1) / get_chunk_size();
+        }
+        
+        // Returns the pointers required for all the internal structures. The pointers are part of "buffer".
+        void get_internal_pointers(Index** nonFullChunks, Index** chunkBitmaps, uint8_t** blocks)
+        {
+            size_t numberChunks = get_number_chunks();
+            *nonFullChunks = (Index*)(buffer);
+            *chunkBitmaps = (Index*)(buffer + numberChunks * sizeof(Index));
+            *blocks = buffer + numberChunks * sizeof(Index) * 2;
+        }
+
         size_t block_count_from_size(size_t _blockSize, size_t _bufferSize)
         {
-            _bufferSize -= 16;
+            _bufferSize -= sizeof(Index) * 2;
             return size_t(_bufferSize / (_blockSize + 0.25));
         }
 
-        void initialize_internal(uint8_t* _buffer, size_t _blockSize, size_t _numberBlocks, size_t _numberChunks, bool _allocFallback = false)
+        void initialize_internal(uint8_t* _buffer, size_t _blockSize, size_t _numberBlocks, size_t _numberChunks)
         {
             release_buffer();
-            externalBuffer = false;
             numberBlocks = _numberBlocks;
             blockSize = _blockSize;
             allocatedBlocks = 0;
             nonFullChunkCount = _numberChunks;
-            allocFallback = _allocFallback;
 
             buffer = _buffer;
-            nonFullChunks = (size_t*)buffer;
-            chunkBitmaps = (size_t*)(buffer + _numberChunks * sizeof(size_t));
-            blocks = buffer + _numberChunks * sizeof(size_t) * 2;
+            Index* nonFullChunks;
+            Index* chunkBitmaps;
+            uint8_t* blocks;
+            get_internal_pointers(&nonFullChunks, &chunkBitmaps, &blocks);
 
             for (size_t i = 0; i < _numberChunks; i++)
                 nonFullChunks[i] = i;
             for (size_t i = 0; i < _numberChunks; i++)
-                chunkBitmaps[i] = (size_t)-1;
+                chunkBitmaps[i] = (Index)-1;
             // If we dont have a multiple of CHUNK_SIZE mark some blocks in last chunk as used
-            if (_numberBlocks % FIXED_POOL_CHUNK_SIZE)
-                chunkBitmaps[_numberChunks - 1] >>= (FIXED_POOL_CHUNK_SIZE - _numberBlocks % FIXED_POOL_CHUNK_SIZE);
+            if (_numberBlocks % get_chunk_size())
+                chunkBitmaps[_numberChunks - 1] >>= (get_chunk_size() - _numberBlocks % get_chunk_size());
         }
 
     public:
 
         FixedMemoryPool() {}
-        FixedMemoryPool(size_t _blockSize, size_t _numberBlocks, bool _allocFallback = false)
+
+        FixedMemoryPool(size_t _blockSize, size_t _numberBlocks) requires (ExternalBuffer == false)
         {
-            restart(_blockSize, _numberBlocks, _allocFallback);
+            restart(_blockSize, _numberBlocks);
         }
-        FixedMemoryPool(size_t _blockSize, uint8_t* _buffer, size_t _bufferSize, bool _allocFallback = false)
+
+        FixedMemoryPool(size_t _blockSize, uint8_t* _buffer, size_t _bufferSize) requires (ExternalBuffer == true)
         {
-            restart(_blockSize, _buffer, _bufferSize, _allocFallback);
+            restart(_blockSize, _buffer, _bufferSize);
         }
         
         ~FixedMemoryPool() 
@@ -210,20 +228,19 @@ namespace mempool {
             release_buffer();
         }
 
-        void restart(size_t _blockSize, size_t _numberBlocks, bool _allocFallback = false)
+        void restart(size_t _blockSize, size_t _numberBlocks) requires (ExternalBuffer == false)
         {
-            size_t numberChunks = (_numberBlocks + FIXED_POOL_CHUNK_SIZE - 1) / FIXED_POOL_CHUNK_SIZE;
-            uint8_t* newBuffer = new  uint8_t[_blockSize * _numberBlocks + numberChunks * sizeof(size_t) * 2];
-            initialize_internal(newBuffer, _blockSize, _numberBlocks, numberChunks, _allocFallback);
-            externalBuffer = false;
+            numberBlocks = _numberBlocks;
+            size_t numberChunks = get_number_chunks();
+            uint8_t* newBuffer = new uint8_t[_blockSize * _numberBlocks + numberChunks * sizeof(Index) * 2];
+            initialize_internal(newBuffer, _blockSize, _numberBlocks, numberChunks);
         }
         
-        void restart(size_t _blockSize, uint8_t* _buffer, size_t _bufferSize, bool _allocFallback = false)
+        void restart(size_t _blockSize, uint8_t* _buffer, size_t _bufferSize) requires (ExternalBuffer == true)
         {
             numberBlocks = block_count_from_size(_blockSize, _bufferSize);
-            size_t numberChunks = (numberBlocks + FIXED_POOL_CHUNK_SIZE - 1) / FIXED_POOL_CHUNK_SIZE;
-            initialize_internal(_buffer, _blockSize, numberBlocks, numberChunks, _allocFallback);
-            externalBuffer = true;
+            size_t numberChunks = get_number_chunks();
+            initialize_internal(_buffer, _blockSize, numberBlocks, numberChunks);
         }
         
         void* allocate()
@@ -232,16 +249,21 @@ namespace mempool {
 
             if (nonFullChunkCount == 0) {
                 lock.unlock();
-                if (!allocFallback)
+                if (!AllocFallback) 
                     throw std::bad_alloc();
                 return new uint8_t[blockSize];
             }
+            
+            Index* nonFullChunks;
+            Index* chunkBitmaps;
+            uint8_t* blocks;
+            get_internal_pointers(&nonFullChunks, &chunkBitmaps, &blocks);
 
-            size_t chunkIndex = nonFullChunks[nonFullChunkCount - 1];
-            size_t bitmap = chunkBitmaps[chunkIndex];
+            Index chunkIndex = nonFullChunks[nonFullChunkCount - 1];
+            Index bitmap = chunkBitmaps[chunkIndex];
 
             size_t freeBlock = unsafe_bit_scan_forward(bitmap);
-            bitmap ^= (size_t)1 << freeBlock;
+            bitmap ^= (Index)1 << freeBlock;
 
             chunkBitmaps[chunkIndex] = bitmap;
             nonFullChunkCount -= (bitmap == 0);
@@ -249,7 +271,7 @@ namespace mempool {
 
             lock.unlock();
 
-            uint8_t* ptr = blocks + blockSize * (chunkIndex * FIXED_POOL_CHUNK_SIZE + freeBlock);
+            uint8_t* ptr = blocks + blockSize * (chunkIndex * get_chunk_size() + freeBlock);
             return ptr;
         }
 
@@ -257,6 +279,12 @@ namespace mempool {
         {
             if (ptr == nullptr)
                 return;
+
+            Index* nonFullChunks;
+            Index* chunkBitmaps;
+            uint8_t* blocks;
+            get_internal_pointers(&nonFullChunks, &chunkBitmaps, &blocks);
+
             size_t index = size_t((uint8_t*)ptr - blocks) / blockSize;
             // Pointer came from new allocation
             if (index >= numberBlocks) {
@@ -266,16 +294,16 @@ namespace mempool {
 
             lock.lock();
 
-            size_t chunkIndex = index / FIXED_POOL_CHUNK_SIZE;
-            size_t blockIndex = index % FIXED_POOL_CHUNK_SIZE;
+            size_t chunkIndex = index / get_chunk_size();
+            size_t blockIndex = index % get_chunk_size();
 
-            size_t bitmap = chunkBitmaps[chunkIndex];
+            Index bitmap = chunkBitmaps[chunkIndex];
             //This chunk now has one free block; append to stack
             if (bitmap == 0) {
                 nonFullChunks[nonFullChunkCount] = chunkIndex;
                 nonFullChunkCount += (bitmap == 0);
             }
-            bitmap |= (size_t)1 << blockIndex;
+            bitmap |= (Index)1 << blockIndex;
             chunkBitmaps[chunkIndex] = bitmap;
             allocatedBlocks -= 1;
 
@@ -313,12 +341,11 @@ namespace mempool {
         // Returns the ammount of memory used by this pool, that is, the sum of the data blocks and required metadata
         size_t get_internal_allocated_memory() 
         {
-            size_t numberChunks = (numberBlocks + FIXED_POOL_CHUNK_SIZE - 1) / FIXED_POOL_CHUNK_SIZE;
-            return numberBlocks * blockSize + numberChunks * sizeof(size_t) * 2;
+            return numberBlocks * blockSize + get_number_chunks() * sizeof(Index) * 2;
         }
 
         // Returns the buffer that the pool uses internally for blocks and metadata
-        void get_internal_buffer()
+        uint8_t* get_internal_buffer()
         {
             return buffer;
         }
@@ -422,20 +449,13 @@ namespace mempool {
     {
         size_t isFree : 1;
         size_t firstOfSegment : 1;  // Is this block the first of a given allocation?
-        size_t subSizeID : 8;  // Suballocation size used by this block, or VAR_SIZE_ID if it doesn't use suballocation
+        size_t allocID : 8;  // Suballocation size used by this block, or VAR_ALLOC_ID if it doesn't use suballocation
 #if IS_64BIT
         size_t length : 54;
 #else
         size_t length : 22;
 #endif
         size_t previous;  // Index of previous segment
-    };
-
-    struct FixedBlockNode
-    {
-        size_t prev;
-        void* blockPtr;
-        size_t next;
     };
 
     struct FreeSegment {
@@ -448,6 +468,9 @@ namespace mempool {
             index = _idx;
         }
     };
+
+    // Pools for suballocations will be small; we can uint16_t indexes to further reduce their overhead
+    using SuballocationPool = FixedMemoryPool<NoLock, false, true, uint16_t>;
 
     // For memory efficiency the bTree will only store the block index, and
     // we will fetch the length from the blockNodes array.
@@ -463,24 +486,28 @@ namespace mempool {
         }
     };
 
-    const int VAR_SIZE_ID = 255;  // Use variable block allocation
-    const int FREE_NODE_HEAD = 255;
-    const size_t END_OF_LINKED_LIST = -1;
+    const int VAR_ALLOC_ID = 255;  // Use variable block allocation
     const size_t VAR_POOL_BLOCK_SIZE = 1024;
-    const size_t VAR_POOL_SUBALLOC_SEGMENT_SIZE = 32;  // Use this segment size per suballocation
-    const size_t VAR_ALLOC_THRESHOLD = 5120;  // Always use variable block allocation for sizes larger than this
+    const size_t VAR_ALLOC_THRESHOLD = 8192;  // Always use variable block allocation for sizes larger than this
+    const int NEXT_LINK = 1;
+    const int PREV_LINK = 0;
 
-    // A memory pool with fixed size blocks, but it can allocate/free any number of contiguous blocks.
-    // It requires about 24 bytes of additional space for each block.
-    // allocate() and free() are O(log n), with n the number of blocks in the pool.
+    const int VAR_POOL_SUBALLOC_SEGMENT_SIZE[] = {
+        16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,  // 1 - 16 bytes
+        16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,  // 2^4 - 2^6 bytes
+        25, 22, 18, 22, 17, 17, 25, 24, 21, 26, 26, 25, 23, 25, 27, 24,  // 2^6 - 2^8 bytes
+        22, 26, 20, 26, 22, 25, 31, 28, 22, 27, 20, 25, 22, 29, 31,  0,  // 2^8 - 2^10 bytes
+        35, 39, 40, 47, 44, 51, 47,  0, 70, 68, 69,  0, 75, 81, 79,  0,  // 2^10 - 2^12 bytes
+        95,  0, 94,  0, 98,  0, 98,  0,                                  // 2^12 - 2^13 bytes
+    };
+    
     template<typename LockType = NoLock>
     class VariableMemoryPool
     {
         size_t numberBlocks = 0;
-        size_t fixedNodeHeads[256];
+        uint8_t* suballocationHeads[88];
         uint8_t* data = nullptr;
         VarBlockNode* blockNodes = nullptr;
-        FixedBlockNode* fixedNodes = nullptr;
 
         struct FreeSegmentComparator {
             const VariableMemoryPool& pool;
@@ -521,7 +548,7 @@ namespace mempool {
         bool allocFallback = false;
         LockType lock;
 
-        size_t id_to_size(size_t id)
+        size_t alloc_id_to_size(size_t id)
         {
             id += 1;
             if (id <= 16)
@@ -531,7 +558,7 @@ namespace mempool {
             return size;
         }
 
-        size_t size_to_id(size_t size)
+        size_t size_to_alloc_id(size_t size)
         {
             size -= 1;
             if (size < 16)
@@ -539,8 +566,8 @@ namespace mempool {
             int id = unsafe_int_log2(size);
             id = (id - 2) * 8 + (size >> (id - 3) & 7);
             // Fits perfectly in one or more blocks. Using suballocation would only add overhead.
-            if (id_to_size(id) % VAR_POOL_BLOCK_SIZE == 0)
-                return VAR_SIZE_ID;
+            if (alloc_id_to_size(id) % VAR_POOL_BLOCK_SIZE == 0)
+                return VAR_ALLOC_ID;
             return id;
         }
 
@@ -601,81 +628,86 @@ namespace mempool {
             freeSegments.insert({ blockIndex });
         }
 
-        void deallocate_fixblock(void* ptr, size_t blockIndex)
+        void deallocate_fixblock(void* allocPtr, size_t blockIndex)
         {
             while (!blockNodes[blockIndex].firstOfSegment)
                 blockIndex -= 1;
 
-            FixedMemoryPool<>* pool = (FixedMemoryPool<>*)(data + blockIndex * VAR_POOL_BLOCK_SIZE);
-            size_t* metadata = (size_t*)(data + blockIndex * VAR_POOL_BLOCK_SIZE + sizeof(FixedMemoryPool<>));
-            size_t node = *metadata;
-            size_t sizeID = blockNodes[blockIndex].subSizeID;
+            uint8_t* blockPtr = data + blockIndex * VAR_POOL_BLOCK_SIZE;
+            SuballocationPool* pool = (SuballocationPool*)blockPtr;
+            uint8_t** links = (uint8_t**)(blockPtr + sizeof(SuballocationPool));
+            size_t allocID = blockNodes[blockIndex].allocID;
 
             bool isFull = pool->full();
-            pool->free(ptr);
+            pool->free(allocPtr);
 
+            // If the pool is now empty free its segment so that it can be used by others
             if (pool->empty()) {
                 deallocate_varblock(blockIndex);
 
-                if (fixedNodeHeads[sizeID] == node)
-                    fixedNodeHeads[sizeID] = fixedNodes[node].next;
-
-                if (fixedNodes[node].next != END_OF_LINKED_LIST)
-                    fixedNodes[fixedNodes[node].next].prev = fixedNodes[node].prev;
-                if (fixedNodes[node].prev != END_OF_LINKED_LIST)
-                    fixedNodes[fixedNodes[node].prev].next = fixedNodes[node].next;
-
-                // Add the fixed node to the available stack
-                fixedNodes[node].next = fixedNodeHeads[FREE_NODE_HEAD];
-                fixedNodeHeads[FREE_NODE_HEAD] = node;
+                // And remove from linked list...
+                if (suballocationHeads[allocID] == blockPtr)
+                    suballocationHeads[allocID] = links[NEXT_LINK];
+                if (links[NEXT_LINK] != nullptr) {
+                    uint8_t** nextLinks =  (uint8_t**)(links[NEXT_LINK] + sizeof(SuballocationPool));
+                    nextLinks[PREV_LINK] = links[PREV_LINK];
+                }
+                if (links[PREV_LINK] != nullptr) {
+                    uint8_t** prevLinks =  (uint8_t**)(links[PREV_LINK] + sizeof(SuballocationPool));
+                    prevLinks[NEXT_LINK] = links[NEXT_LINK];
+                }
             }
+            // If the pool was full, now it isn't. Put it in the list of available fixed pools.
             else if (isFull) {
-                // If the pool was full, now it isn't. Put it in the list of available fixed pools.
-                fixedNodes[node].prev = END_OF_LINKED_LIST;
-                fixedNodes[node].next = fixedNodeHeads[sizeID];
-                fixedNodes[fixedNodeHeads[sizeID]].prev = node;
-                fixedNodeHeads[sizeID] = node;
+                links[PREV_LINK] = nullptr;
+                links[NEXT_LINK] = suballocationHeads[allocID];
+                if (suballocationHeads[allocID] != nullptr) {
+                    uint8_t** headLinks =  (uint8_t**)(suballocationHeads[allocID] + sizeof(SuballocationPool));
+                    headLinks[PREV_LINK] = blockPtr;
+                }
+                suballocationHeads[allocID] = blockPtr;
             }
         }
 
-        void* allocate_fixblock(size_t sizeID)
+        void* allocate_fixblock(size_t allocID)
         {
-            if (fixedNodeHeads[sizeID] != END_OF_LINKED_LIST)
+            if (suballocationHeads[allocID] != nullptr)
             {
-                void* ptr = fixedNodes[fixedNodeHeads[sizeID]].blockPtr;
-                FixedMemoryPool<>* pool = (FixedMemoryPool<>*)ptr;
-                ptr = pool->allocate();
+                SuballocationPool* pool = (SuballocationPool*)suballocationHeads[allocID];
+                void* ptr = pool->allocate();
 
-                // Remove the pool from the free pool list
+                // Remove the pool from the free pool linked list
                 if (pool->full()) {
-                    size_t node = fixedNodeHeads[sizeID];
-                    fixedNodeHeads[sizeID] = fixedNodes[node].next;
+                    uint8_t** links = (uint8_t**)(suballocationHeads[allocID] + sizeof(SuballocationPool));
+                    suballocationHeads[allocID] = links[NEXT_LINK];
+                    if (links[NEXT_LINK] != nullptr) {
+                        links = (uint8_t**)(links[NEXT_LINK] + sizeof(SuballocationPool));
+                        links[PREV_LINK] = nullptr;
+                    }
                 }
                 return ptr;
             }
 
-            void* ptr = allocate_varblock(VAR_POOL_SUBALLOC_SEGMENT_SIZE);
+            void* ptr = allocate_varblock(VAR_POOL_SUBALLOC_SEGMENT_SIZE[allocID]);
             if (!ptr)
                 return nullptr;
             size_t blockIndex = size_t((uint8_t*)ptr - data) / VAR_POOL_BLOCK_SIZE;
 
-            size_t chunkOverhead = sizeof(FixedMemoryPool<>) + sizeof(size_t);
-            FixedMemoryPool<>* pool = new (ptr) FixedMemoryPool<>(
-                id_to_size(sizeID), (uint8_t*)ptr + chunkOverhead, VAR_POOL_BLOCK_SIZE * VAR_POOL_SUBALLOC_SEGMENT_SIZE - chunkOverhead
+            size_t chunkOverhead = sizeof(SuballocationPool) + sizeof(uint8_t*) * 2;
+            SuballocationPool* pool = new (ptr) SuballocationPool(
+                alloc_id_to_size(allocID), (uint8_t*)ptr + chunkOverhead, 
+                VAR_POOL_BLOCK_SIZE * VAR_POOL_SUBALLOC_SEGMENT_SIZE[allocID] - chunkOverhead
             );
 
-            size_t node = fixedNodeHeads[FREE_NODE_HEAD];
-            fixedNodeHeads[sizeID] = node;
-            fixedNodeHeads[FREE_NODE_HEAD] = fixedNodes[node].next;
-            size_t* metadata = (size_t*)((uint8_t*)ptr + sizeof(FixedMemoryPool<>));
-            *metadata = node;
+            // Add pool to free pool linked list
+            suballocationHeads[allocID] = (uint8_t*)ptr;
+            uint8_t** links = (uint8_t**)(suballocationHeads[allocID] + sizeof(SuballocationPool));
+            links[PREV_LINK] = nullptr;
+            links[NEXT_LINK] = nullptr;
 
-            fixedNodes[node].next = END_OF_LINKED_LIST;
-            fixedNodes[node].blockPtr = ptr;
-            fixedNodes[node].prev = END_OF_LINKED_LIST;
-            for (size_t i = 0; i < VAR_POOL_SUBALLOC_SEGMENT_SIZE; i++) {
+            for (size_t i = 0; i < VAR_POOL_SUBALLOC_SEGMENT_SIZE[allocID]; i++) {
                 blockNodes[blockIndex + i].firstOfSegment = i == 0;
-                blockNodes[blockIndex + i].subSizeID = sizeID;
+                blockNodes[blockIndex + i].allocID = allocID;
             }
 
             ptr = pool->allocate();
@@ -693,7 +725,6 @@ namespace mempool {
         ~VariableMemoryPool() {
             delete[] data;
             delete[] blockNodes;
-            delete[] fixedNodes;
         }
 
         void restart(size_t _poolSize, bool _allocFallback = false)
@@ -702,8 +733,6 @@ namespace mempool {
             data = nullptr;
             delete[] blockNodes;
             blockNodes = nullptr;
-            delete[] fixedNodes;
-            fixedNodes = nullptr;
 
             numberBlocks = (_poolSize + VAR_POOL_BLOCK_SIZE - 1) / VAR_POOL_BLOCK_SIZE;
             data = new uint8_t[VAR_POOL_BLOCK_SIZE * numberBlocks];
@@ -731,23 +760,16 @@ namespace mempool {
             size_t kMaxInternalCount = kMaxLeafCount / ((kNodeValues + 1) / 2) + 1;
 
             freeSegments.clear();
-            bTreeLeafPool.restart(kLeafNodeSize, kMaxLeafCount, false);
-            bTreeInternalPool.restart(kInternalNodeSize, kMaxInternalCount, false);
+            bTreeLeafPool.restart(kLeafNodeSize, kMaxLeafCount);
+            bTreeInternalPool.restart(kInternalNodeSize, kMaxInternalCount);
 
             allocFallback = _allocFallback;
             blockNodes[0].isFree = true;
             blockNodes[0].length = numberBlocks;
             blockNodes[0].previous = 0;
             freeSegments.insert(bTreeFreeSegment(0));
-
-            // Initialize fixed memory pools
-            size_t numberFixedNodes = numberBlocks / VAR_POOL_SUBALLOC_SEGMENT_SIZE;
-            fixedNodes = new FixedBlockNode[numberFixedNodes];
-            for (size_t i = 0; i < numberFixedNodes; i++)
-                fixedNodes[i].next = i == 0 ? END_OF_LINKED_LIST : i - 1;
             for (size_t i = 0; i < 256; i++)
-                fixedNodeHeads[i] = END_OF_LINKED_LIST;
-            fixedNodeHeads[FREE_NODE_HEAD] = numberFixedNodes - 1;
+                suballocationHeads[i] = nullptr;
         }
 
         void* allocate(size_t size)
@@ -759,18 +781,17 @@ namespace mempool {
             lock.lock();
 
             void* ptr = nullptr;
-            if (size < VAR_ALLOC_THRESHOLD) {
-                int id = size_to_id(size);
-                if (id != VAR_SIZE_ID) {
+            if (size < VAR_ALLOC_THRESHOLD && 0) {
+                int id = size_to_alloc_id(size);
+                if (id != VAR_ALLOC_ID) 
                     ptr = allocate_fixblock(id);
-                }
             }
 
             if (!ptr) {
                 ptr = allocate_varblock(blocksRequested);
                 if (ptr) {
                     size_t blockIndex = size_t((uint8_t*)ptr - data) / VAR_POOL_BLOCK_SIZE;
-                    blockNodes[blockIndex].subSizeID = VAR_SIZE_ID;
+                    blockNodes[blockIndex].allocID = VAR_ALLOC_ID;
                 }
             }
 
@@ -799,7 +820,7 @@ namespace mempool {
 
             // Check if this pointer is part of a suballocation inside a 
             // fixed memory pool or if it comes from a variable block allocation.
-            if (blockNodes[blockIndex].subSizeID != VAR_SIZE_ID)
+            if (blockNodes[blockIndex].allocID != VAR_ALLOC_ID)
                 deallocate_fixblock(ptr, blockIndex);
             else 
                 deallocate_varblock(blockIndex);
@@ -814,7 +835,6 @@ namespace mempool {
             usedMemory += sizeof(VarBlockNode) * numberBlocks;  // block nodes
             usedMemory += bTreeLeafPool.get_internal_allocated_memory();
             usedMemory += bTreeInternalPool.get_internal_allocated_memory();
-            usedMemory += sizeof(FixedBlockNode) * (numberBlocks / VAR_POOL_SUBALLOC_SEGMENT_SIZE);  // fixed nodes
             return usedMemory;
         }
     };
