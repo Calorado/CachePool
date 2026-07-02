@@ -19,11 +19,11 @@ with this file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
 #include "memorypool.h"
 
-const size_t NUMBER_THREADS = std::thread::hardware_concurrency();
-const size_t MAX_ALLOCATED_CHUNKS = 1024;  // Per thread
-const size_t MAX_CHUNK_SIZE = 1 << 16;
+const size_t NUMBER_THREADS = 1;// std::thread::hardware_concurrency();
+const size_t MAX_ALLOCATED_CHUNKS = 4096;  // Per thread
+const size_t MAX_CHUNK_SIZE = 1 << 20;
 const size_t POOL_SIZE = MAX_ALLOCATED_CHUNKS * MAX_CHUNK_SIZE * NUMBER_THREADS;
-const bool SKIP_BUFFER_CHECK = false;  // If true do not check if the buffer was overwritten. Useful for testing allocation speed.
+const bool SKIP_BUFFER_CHECK = true;  // If true do not check if the buffer was overwritten. Useful for testing allocation speed.
 
 struct StdAllocMemoryPool
 {
@@ -48,8 +48,8 @@ uint64_t random(uint64_t* value) {
 	return *value;
 }
 
-//mempool::VariableMemoryPool<std::mutex> memoryPool = mempool::VariableMemoryPool<std::mutex>(POOL_SIZE, false);
-StdAllocMemoryPool memoryPool = StdAllocMemoryPool();
+mempool::variablepool::VariableMemoryPool<std::mutex> memoryPool = mempool::variablepool::VariableMemoryPool<std::mutex>(POOL_SIZE, false);
+//StdAllocMemoryPool memoryPool = StdAllocMemoryPool();
 std::atomic_uint64_t totalAllocations;
 
 size_t find_maximum_allocation(size_t blockSize) 
@@ -107,7 +107,7 @@ int main()
 		std::cout << "\nMemory used by pool: " << memoryPool.get_internal_allocated_memory();
 
 		std::vector<std::string> results;
-		for (int i = 1; i <= 1048576; i++) {
+		for (int i = 1; i <= 1048576; i++) { 
 			int log = log2(i);
 			if (log >= 12 && (i & (1 << log - 12) - 1) != 0)
 				continue;
