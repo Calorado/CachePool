@@ -3,5 +3,6 @@
 *.slnx
 *.py
 *.csv
+*.txt
 MemoryPool/*
 x64/*

@@ -23,7 +23,8 @@ const size_t NUMBER_THREADS = 1;// std::thread::hardware_concurrency();
 const size_t MAX_ALLOCATED_CHUNKS = 4096;  // Per thread
 const size_t MAX_CHUNK_SIZE = 1 << 20;
 const size_t POOL_SIZE = MAX_ALLOCATED_CHUNKS * MAX_CHUNK_SIZE * NUMBER_THREADS;
-const bool SKIP_BUFFER_CHECK = true;  // If true do not check if the buffer was overwritten. Useful for testing allocation speed.
+const bool SKIP_BUFFER_CHECK = false;  // If true do not check if the buffer was overwritten. Useful for testing allocation speed.
+const int ALLOC_SIZE_POWER = 1;
 
 struct StdAllocMemoryPool
 {
@@ -42,9 +43,7 @@ struct StdAllocMemoryPool
 uint64_t random(uint64_t* value) {
 	*value ^= *value >> 33;
 	*value *= 0xff51afd7ed558ccd;
-	*value ^= *value >> 33;
 	*value += 0xc4ceb9fe1a85ec53;
-	*value ^= *value >> 33;
 	return *value;
 }
 
@@ -66,16 +65,34 @@ size_t find_maximum_allocation(size_t blockSize)
 	}
 }
 
+size_t calculate_total_allocated(size_t* allocatedSizes)
+{
+	size_t result = 0;
+	for (int i = 0; i < MAX_ALLOCATED_CHUNKS; i++)
+		result += allocatedSizes[i];
+	return result;
+}
+
+size_t scale_chunk_size(size_t size, int power)
+{
+	size_t result = size;
+	for (int i = 1; i < power; i++)
+		result = (result * size) / MAX_CHUNK_SIZE;
+	return std::max(result, (size_t)1);
+}
+
 void testing_thread(int id) 
 {
 	uint8_t* allocatedChunks[MAX_ALLOCATED_CHUNKS];
 	memset(allocatedChunks, 0, sizeof(uint8_t*) * MAX_ALLOCATED_CHUNKS);
 	size_t allocatedSizes[MAX_ALLOCATED_CHUNKS];
+	memset(allocatedSizes, 0, sizeof(size_t) * MAX_ALLOCATED_CHUNKS);
 	uint64_t seed = id;
 
 	while (true) {
 		uint64_t chunkIdx = random(&seed) % MAX_ALLOCATED_CHUNKS;
 		if (allocatedChunks[chunkIdx]) {
+			//std::cout << "\nDealloc" << std::flush;
 			if (!SKIP_BUFFER_CHECK) {
 				size_t expectedID = 1 + chunkIdx % 255;
 				size_t count = std::count(allocatedChunks[chunkIdx], allocatedChunks[chunkIdx] + allocatedSizes[chunkIdx], expectedID);
@@ -88,15 +105,20 @@ void testing_thread(int id)
 
 			memoryPool.free(allocatedChunks[chunkIdx]);
 			allocatedChunks[chunkIdx] = nullptr;
+			allocatedSizes[chunkIdx] = 0;
 		}
 		else {
+			//std::cout << "\nAlloc" << std::flush;
 			uint64_t chunkSize = random(&seed) % MAX_CHUNK_SIZE + 1;
+			chunkSize = scale_chunk_size(chunkSize, ALLOC_SIZE_POWER);
 			uint8_t* ptr = (uint8_t*)memoryPool.allocate(chunkSize);
 			allocatedChunks[chunkIdx] = ptr;
 			allocatedSizes[chunkIdx] = chunkSize;
+			
 			if (!SKIP_BUFFER_CHECK)
 				memset(ptr, 1 + chunkIdx % 255, chunkSize);
 		}
+		//std::cout << "\nIteration" << std::flush;
 		totalAllocations.fetch_add(1);
 	}
 }
@@ -107,7 +129,7 @@ int main()
 		std::cout << "\nMemory used by pool: " << memoryPool.get_internal_allocated_memory();
 
 		std::vector<std::string> results;
-		for (int i = 1; i <= 1048576; i++) { 
+		for (int i = (1 << 0); i <= (1 << 20); i++) { 
 			int log = log2(i);
 			if (log >= 12 && (i & (1 << log - 12) - 1) != 0)
 				continue;
@@ -127,15 +149,17 @@ int main()
 	}
 
 	if (1) {
-		auto startTime = std::chrono::high_resolution_clock::now();
+		
 		std::thread* threads = new std::thread[NUMBER_THREADS];
 		for (int i = 0; i < NUMBER_THREADS; i++)
 			threads[i] = std::thread(testing_thread, i);
 
 		while (true) {
+			auto startTime = std::chrono::high_resolution_clock::now();
+			totalAllocations.store(0);
+			std::this_thread::sleep_for(std::chrono::seconds(1));
 			auto currentTime = std::chrono::high_resolution_clock::now();
 			std::cout << "\nAllocations: " << (float)totalAllocations.load() / (currentTime - startTime).count() * 1e9 << "/s";
-			std::this_thread::sleep_for(std::chrono::seconds(1));
 		}
 	}
 }

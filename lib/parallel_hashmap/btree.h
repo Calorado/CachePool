@@ -3832,7 +3832,7 @@ namespace priv {
     template <typename Key, typename Compare, typename Alloc>
     class btree_set : public priv::btree_set_container<
         priv::btree<priv::set_params<
-            Key, Compare, Alloc, /*TargetNodeSize=*/ 1024, /*Multi=*/ false>>> 
+            Key, Compare, Alloc, /*TargetNodeSize=*/ 512, /*Multi=*/ false>>> 
     {
         using Base = typename btree_set::btree_set_container;
 
