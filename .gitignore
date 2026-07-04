@@ -4,5 +4,7 @@
 *.py
 *.csv
 *.txt
+*.dll
+lib/mimalloc/*
 MemoryPool/*
 x64/*

@@ -29,6 +29,20 @@ The pool is composed of blocks of 64 bytes. It has 2 different allocation mechan
 The overhead varies depending on the size of the allocation, but is generally low.
 ![](overhead.png)
 
+> mimalloc has really high overhead spikes at sizes 64KiB and 512KiB. I am not sure if this is really how it works or if its a configuration issue on my side.
+
+It has decent allocation throughput in single threaded environments. The following tests were done using:
+- Visual Studio 2026
+- Windows 11
+- Ryzen 6900HX@3.3GHz.
+
+The following commands were used:
+- Small allocations: `memorypool -s 42 -d 1e-2 -a 1000000 -p 1000000000 benchmark mimalloc`
+- Mixed allocations: `memorypool -s 42 -d 1e-5 -a 1000000 -p 1000000000 benchmark mimalloc`
+- Large allocations: `memorypool -s 42 -d 0 -a 1000000 -p 1000000000 benchmark mimalloc`
+
+![](throughput.png)
+
 ## Libraries
 
 B-tree from [parallel-hashmap](https://github.com/greg7mdp/parallel-hashmap) by Gregory Popovitch 
