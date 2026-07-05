@@ -19,7 +19,7 @@ with this file, You can obtain one at http://mozilla.org/MPL/2.0/.
 #include <string>
 #include <random>
 
-#include "memorypool.h"
+#include "cachepool.h"
 #include "lib/mimalloc/include/mimalloc.h"
 #include "lib/mimalloc/include/mimalloc-stats.h"
 
@@ -87,7 +87,7 @@ void test_overhead(Allocator* allocator, std::string name, std::vector<std::stri
 					internalSize = committed;
 				}
 			}
-			// mypool throws std::bad_alloc when its full
+			// cachepool throws std::bad_alloc when its full
 			catch (std::bad_alloc& e) {
 				internalSize = allocator->get_internal_allocated_memory();
 				break;
@@ -147,7 +147,10 @@ void test_thread(Allocator* allocator, std::atomic_uint64_t* totalAllocations, s
 				ptr = (uint8_t*)allocator->allocate(chunkSize);
 			}
 			catch (std::bad_alloc& e) {
-				std::cout << "\nERROR: std::bad_alloc";
+				size_t usage = 0;
+				for (int i = 0; i < maxAllocations; i++)
+					usage = allocatedSizes[i];
+				std::cout << "\nERROR: std::bad_alloc, with " << usage << " bytes allocated.";
 				exit(-1);
 			}
 			allocatedChunks[chunkIdx] = ptr;
@@ -163,11 +166,11 @@ void test_thread(Allocator* allocator, std::atomic_uint64_t* totalAllocations, s
 int main(int argc, char* argv[])
 {
 	if (argc < 3) {
-		std::cout << "Usage: memorypool [OPTIONS...] [TEST_TYPE] [ALLOCATOR]" << "\n";
+		std::cout << "Usage: cachepool [OPTIONS...] [TEST_TYPE] [ALLOCATOR]" << "\n";
 		std::cout << "Allocators" << "\n";
 		std::cout << "stdnew: use new[] and delete[]." << "\n";
 		std::cout << "mimalloc: use Microsofts mimalloc library." << "\n";
-		std::cout << "mypool: use the memory pool in this library." << "\n";
+		std::cout << "cachepool: use the memory pool in this library." << "\n";
 		std::cout << "Test types" << "\n";
 		std::cout << "overhead: calculate memory overhead for different allocation sizes. Outputs results to overhead.csv. Only implemented for mypool." << "\n";
 		std::cout << "fuzz: test that the allocator works correctly." << "\n";
@@ -224,7 +227,7 @@ int main(int argc, char* argv[])
 
 		StdNewAllocator stdNewAllocator = StdNewAllocator();
 		MimallocAllocator mimallocAllocator = MimallocAllocator();
-		mempool::variablepool::VariableMemoryPool<std::mutex> mypoolAllocator = mempool::variablepool::VariableMemoryPool<std::mutex>();
+		cachepool::VariableCachePool<std::mutex> cachePoolAllocator = cachepool::VariableCachePool<std::mutex>();
 
 		if (allocator == "stdnew") {
 			for (int i = 0; i < threadCount; i++) 
@@ -236,10 +239,10 @@ int main(int argc, char* argv[])
 				threads[i] = std::thread(test_thread<MimallocAllocator>, &mimallocAllocator, &totalAllocations,
 					maxAllocations, maxAllocationSize, allocationDistribution, seed, skipCheck);
 		}
-		else if (allocator == "mypool") {
-			mypoolAllocator.restart(poolSize);
+		else if (allocator == "cachepool") {
+			cachePoolAllocator.restart(poolSize);
 			for (int i = 0; i < threadCount; i++)
-				threads[i] = std::thread(test_thread<mempool::variablepool::VariableMemoryPool<std::mutex>>, &mypoolAllocator,
+				threads[i] = std::thread(test_thread<cachepool::VariableCachePool<std::mutex>>, &cachePoolAllocator,
 					&totalAllocations, maxAllocations, maxAllocationSize, allocationDistribution, seed, skipCheck);
 		}
 		else {
@@ -264,13 +267,13 @@ int main(int argc, char* argv[])
 	else if (test == "overhead")
 	{
 		std::vector<std::string> results;
-		mempool::variablepool::VariableMemoryPool<std::mutex> mypoolAllocator = mempool::variablepool::VariableMemoryPool<std::mutex>();
+		cachepool::VariableCachePool<std::mutex> cachePoolAllocator = cachepool::VariableCachePool<std::mutex>();
 		MimallocAllocator mimallocAllocator = MimallocAllocator();
 
-		if (allocator == "mypool") {
-			mypoolAllocator.restart(poolSize);
-			std::cout << "\nMemory used by pool: " << mypoolAllocator.get_internal_allocated_memory();
-			test_overhead<mempool::variablepool::VariableMemoryPool<std::mutex>>(&mypoolAllocator, allocator, &results, poolSize);
+		if (allocator == "cachepool") {
+			cachePoolAllocator.restart(poolSize);
+			std::cout << "\nMemory used by pool: " << cachePoolAllocator.get_internal_allocated_memory();
+			test_overhead<cachepool::VariableCachePool<std::mutex>>(&cachePoolAllocator, allocator, &results, poolSize);
 		}
 		else if (allocator == "mimalloc")
 			test_overhead<MimallocAllocator>(&mimallocAllocator, allocator, &results, poolSize);
