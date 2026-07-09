@@ -25,8 +25,8 @@ To reduce memory use, I group blocks into chunks. Each chunk has a bitmap which 
 A memory pool which can allocate and deallocate any number of bytes. allocate() and free() are O(log n), with n the number of allocated segments in the pool.
 
 The pool is composed of blocks of 64 bytes. It has 2 different allocation mechanisms depending on the size:
-- **>=8192 bytes**: uses a binary tree to quickly find a free segment with enough capacity for the given allocation. A segment can be composed of any number of blocks. Each block has associated information, such as whether is free or occupied, the length of the segment it belongs to and an index pointing to the previous segment.
-- **<8192 bytes**: takes several contiguous blocks using the previous algorithm, and initializes a FixedCachePool in them with an appropiate block size. It uses a linked list to keep track of pools with available blocks for each size. 
+- **>=2048 bytes**: uses a binary tree to quickly find a free segment with enough capacity for the given allocation. A segment can be composed of any number of blocks. Each block has associated information, such as whether is free or occupied, the length of the segment it belongs to and an index pointing to the previous segment.
+- **<2048 bytes**: takes several contiguous blocks using the previous algorithm, and initializes a FixedCachePool in them with an appropiate block size. It uses a linked list to keep track of pools with available blocks for each size. 
 
 The overhead varies depending on the size of the allocation.
 ![](overhead.png)

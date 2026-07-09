@@ -163,18 +163,88 @@ void test_thread(Allocator* allocator, std::atomic_uint64_t* totalAllocations, s
 	}
 }
 
+template<class Allocator>
+void test_fragmentation(Allocator* allocator, std::string name, size_t poolSize, size_t maxAllocationSize, float allocationDistribution, uint32_t seed)
+{	
+	std::vector<uint8_t*> allocatedChunks;
+	std::vector<size_t> allocatedSizes;
+	double avgPoolUsage = -1;
+	uint64_t chunkSize = 1;
+	auto startTime = std::chrono::high_resolution_clock::now();
+
+	std::mt19937 generator(seed);
+	std::uniform_int_distribution<> uniformDistribution(1, maxAllocationSize);
+	std::exponential_distribution<> exponentialDistribution(allocationDistribution);
+
+	while (true) 
+	{
+		auto currentTime = std::chrono::high_resolution_clock::now();
+		double elapsed = (currentTime - startTime).count() / 1e9;
+		if (elapsed > 99999) {
+			for (uint8_t* ptr : allocatedChunks)
+				allocator->free(ptr);
+			//std::cout << "\nIs empty?: " << allocator->empty();
+			return;
+		}
+
+		uint8_t* ptr;
+		try {
+			ptr = (uint8_t*)allocator->allocate(chunkSize);
+
+			if (name == "mimalloc") {
+				size_t committed = allocator->get_internal_allocated_memory();
+				if (committed > poolSize) {
+					allocator->free(ptr);
+					mi_collect(true);  // Returns all uncommitted memory to the OS
+					throw std::bad_alloc();
+				}
+			}
+
+			allocatedChunks.push_back(ptr);
+			allocatedSizes.push_back(chunkSize);
+
+			// Generate a new chunk size for the next iteration
+			if (allocationDistribution == 0)
+				chunkSize = uniformDistribution(generator);
+			else
+				chunkSize = (size_t)std::min(exponentialDistribution(generator), (double)maxAllocationSize);
+			continue;
+		}
+		catch (std::bad_alloc& e) {}
+
+		size_t usage = 0;
+		for (size_t size : allocatedSizes)
+			usage += size;
+
+		if (avgPoolUsage < 0)
+			avgPoolUsage = usage;  // Initialization
+		else
+			avgPoolUsage = (avgPoolUsage * 0.9999) + (usage * 0.0001);
+		std::cout << std::string(100, '\b');
+		std::cout << "Elapsed " << elapsed << "s | Avg Pool Usage: " << avgPoolUsage / poolSize << "%" << "            ";
+
+		if (allocatedChunks.size() > 0) {
+			size_t idx = generator() % allocatedChunks.size();
+			allocator->free(allocatedChunks[idx]);
+			allocatedChunks.erase(allocatedChunks.begin() + idx);
+			allocatedSizes.erase(allocatedSizes.begin() + idx);
+		}
+	}
+}
+
 int main(int argc, char* argv[])
 {
 	if (argc < 3) {
 		std::cout << "Usage: cachepool [OPTIONS...] [TEST_TYPE] [ALLOCATOR]" << "\n";
 		std::cout << "Allocators" << "\n";
 		std::cout << "stdnew: use new[] and delete[]." << "\n";
-		std::cout << "mimalloc: use Microsofts mimalloc library." << "\n";
+		std::cout << "mimalloc: use Microsofts mimalloc library. Allocates arenas of 32MiB." << "\n";
 		std::cout << "cachepool: use the memory pool in this library." << "\n";
 		std::cout << "Test types" << "\n";
 		std::cout << "overhead: calculate memory overhead for different allocation sizes. Outputs results to overhead.csv. Only implemented for mypool." << "\n";
 		std::cout << "fuzz: test that the allocator works correctly." << "\n";
 		std::cout << "benchmark: test number of allocation and deallocations in 10 seconds." << "\n";
+		std::cout << "fragment: test fragmentation by continuously filling the pool until we get an std::bad_alloc." << "\n";
 		std::cout << "Options" << "\n";
 		std::cout << "-t: number of threads. Default 1." << "\n";
 		std::cout << "-d: allocation sizes follow an exponential distribution. This sets the constant. Default 0 (uniform)." << "\n";
@@ -263,6 +333,21 @@ int main(int argc, char* argv[])
 				break;
 		}
 		exit(0);
+	}
+	else if (test == "fragment")
+	{
+		cachepool::VariableCachePool<std::mutex> cachePoolAllocator = cachepool::VariableCachePool<std::mutex>();
+		MimallocAllocator mimallocAllocator = MimallocAllocator();
+		cachePoolAllocator.restart(poolSize);
+
+		if (allocator == "cachepool")
+			test_fragmentation<cachepool::VariableCachePool<std::mutex>>(&cachePoolAllocator, allocator, poolSize, maxAllocationSize, allocationDistribution, seed);
+		else if (allocator == "mimalloc") 
+			test_fragmentation<MimallocAllocator>(&mimallocAllocator, allocator, poolSize, maxAllocationSize, allocationDistribution, seed);
+		else {
+			std::cout << "\nFragmentation test is not implemented for " << allocator;
+			exit(0);
+		}
 	}
 	else if (test == "overhead")
 	{
