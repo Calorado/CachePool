@@ -165,7 +165,10 @@ namespace cachepool {
     >
     class FixedCachePool
     {
-        uint8_t* buffer = nullptr;  // Buffer containing all blocks and metadata of the pool.        
+        uint8_t* buffer = nullptr;  // Buffer containing all blocks and metadata of the pool.
+        // Where in the buffer do these arrays begin
+        Index bitmapsOffset = 0;
+        Index blocksOffset = 0;
         union {
             Index nonFullChunkCount = 0;
             Index inlineBitmap;  // If we have few blocks we directly use this as the bitmap
@@ -173,6 +176,7 @@ namespace cachepool {
         Index allocatedBlocks = 0;
         Index numberBlocks = 0;
         Index blockSize = 1;
+        
         [[no_unique_address]]
 #ifdef _MSC_VER
         [[msvc::no_unique_address]]  // I hate this company
@@ -196,15 +200,6 @@ namespace cachepool {
             return (numberBlocks + get_chunk_size() - 1) / get_chunk_size();
         }
 
-        // Returns the pointers required for all the internal structures. The pointers are part of "buffer".
-        void get_internal_pointers(size_t** nonFullChunks, size_t** chunkBitmaps, uint8_t** blocks)
-        {
-            size_t numberChunks = get_number_chunks(numberBlocks);
-            *nonFullChunks = (size_t*)(buffer);
-            *chunkBitmaps = (size_t*)(buffer + numberChunks * sizeof(size_t));
-            *blocks = buffer + numberChunks * sizeof(size_t) * 2;
-        }
-
         bool use_inline_bitmap()
         {
             return numberBlocks <= sizeof(Index) * 8;
@@ -220,9 +215,10 @@ namespace cachepool {
 
             buffer = _buffer;
             if (!use_inline_bitmap()) {
-                uint8_t* blocks;
-                size_t* nonFullChunks, *chunkBitmaps;
-                get_internal_pointers(&nonFullChunks, &chunkBitmaps, &blocks);
+                bitmapsOffset = get_number_chunks(numberBlocks) * sizeof(size_t);
+                blocksOffset = get_number_chunks(numberBlocks) * sizeof(size_t) * 2;
+                size_t* nonFullChunks = (size_t*)(buffer);
+                size_t* chunkBitmaps = (size_t*)(buffer + bitmapsOffset);
                 for (size_t i = 0; i < _numberChunks; i++)
                     nonFullChunks[i] = i;
                 for (size_t i = 0; i < _numberChunks; i++)
@@ -316,9 +312,9 @@ namespace cachepool {
             }
             else
             {
-                uint8_t* blocks;
-                size_t* chunkBitmaps, *nonFullChunks;
-                get_internal_pointers(&nonFullChunks, &chunkBitmaps, &blocks);
+                size_t* nonFullChunks = (size_t*)(buffer);
+                size_t* chunkBitmaps = (size_t*)(buffer + bitmapsOffset);
+                uint8_t* blocks = buffer + blocksOffset;
 
                 size_t chunkIndex = nonFullChunks[nonFullChunkCount - 1];
                 size_t bitmap = chunkBitmaps[chunkIndex];
@@ -355,9 +351,9 @@ namespace cachepool {
             }
             else
             {
-                uint8_t* blocks;
-                size_t* chunkBitmaps, * nonFullChunks;
-                get_internal_pointers(&nonFullChunks, &chunkBitmaps, &blocks);
+                size_t* nonFullChunks = (size_t*)(buffer);
+                size_t* chunkBitmaps = (size_t*)(buffer + bitmapsOffset);
+                uint8_t* blocks = buffer + blocksOffset;
 
                 size_t index = size_t((uint8_t*)ptr - blocks) / blockSize;
                 // Pointer came from new allocation
@@ -530,7 +526,7 @@ namespace cachepool {
         SuballocationPool pool;
         VarBlockNode* next;
         VarBlockNode* prev;
-        uint8_t sizeClass;
+        //uint8_t sizeClass;
     };
 
     struct VarBlockNode 
@@ -541,7 +537,7 @@ namespace cachepool {
         size_t isFree : 1;
         size_t previous : 63;
         SuballocationNode suballocation;
-        //uint8_t padding[0];
+        //uint8_t padding[8];
 #else
         size_t isSuballocation : 1;
         size_t length : 31;
@@ -592,7 +588,7 @@ namespace cachepool {
     const int PREV_LINK = 0;
 
     // Segment length in blocks for each allocation ID
-    const int SIZE_CLASS_TO_SEGMENT[] = {
+    const int SIZE_CLASS_TO_SEGMENT_LENGTH[] = {
           90,  81,  78,  80,  83,  75,  79,  80,  74,  80,  87,  82,  89,  82,  84,  78,  // 1 - 16 bytes
           82,  73,  77,  81,  85,  85,  87,  85,  94,  78,  81,  80,  81,  87,  86,  93,  // 17 - 32 bytes
           89,  88,  91,  78,  84,  81,  81,  80,  88,  85,  90,  88,  93,  98, 109, 113,  // 2^5 - 2^6 bytes
@@ -603,8 +599,8 @@ namespace cachepool {
           85,  72,  76,  80,  84,  88,  92,  72,  75,  78,  81,  84,  87,  90,  93        // 2^10 - 2^11 bytes
     };
 
-    // Allocation size for each allocation ID
-    const int SIZE_CLASS_TO_SIZE[] = {
+    // Allocation size for each size ID
+    const int SIZE_CLASS_TO_ALLOCATION_SIZE[] = {
            1,    2,    3,    4,    5,    6,    7,    8,    9,   10,   11,   12,   13,   14,   15,   16,  // 1 - 16 bytes
           17,   18,   19,   20,   21,   22,   23,   24,   25,   26,   27,   28,   29,   30,   31,   32,  // 17 - 32 bytes
           34,   36,   38,   40,   42,   44,   46,   48,   50,   52,   54,   56,   58,   60,   62,   64,  // 2^5 - 2^6 bytes
@@ -624,6 +620,73 @@ namespace cachepool {
           16,   16,   16,   14,   16,   14,   12,   12,   12,   12,   12,   10,   12,   10,   12,    9,  // 2^8 - 2^9 bytes
           10,    8,    8,    7,    8,    7,    8,    6,    6,    6,    6,    6,    6,    5,    6,    5,  // 2^9 - 2^10 bytes
            5,    4,    4,    4,    4,    4,    4,    3,    3,    3,    3,    3,    3,    3,    3         // 2^10 - 2^11 bytes
+    };
+
+    const uint8_t ALLOCATION_SIZE_TO_SIZE_CLASS[] = {
+          0,  0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
+         31, 32, 32, 33, 33, 34, 34, 35, 35, 36, 36, 37, 37, 38, 38, 39, 39, 40, 40, 41, 41, 42, 42, 43, 43, 44, 44, 45, 45, 46, 46, 47,
+         47, 48, 48, 48, 48, 49, 49, 49, 49, 50, 50, 50, 50, 51, 51, 51, 51, 52, 52, 52, 52, 53, 53, 53, 53, 54, 54, 54, 54, 55, 55, 55,
+         55, 56, 56, 56, 56, 57, 57, 57, 57, 58, 58, 58, 58, 59, 59, 59, 59, 60, 60, 60, 60, 61, 61, 61, 61, 62, 62, 62, 62, 63, 63, 63,
+         63, 64, 64, 64, 64, 64, 64, 64, 64, 65, 65, 65, 65, 65, 65, 65, 65, 66, 66, 66, 66, 66, 66, 66, 66, 67, 67, 67, 67, 67, 67, 67,
+         67, 68, 68, 68, 68, 68, 68, 68, 68, 69, 69, 69, 69, 69, 69, 69, 69, 70, 70, 70, 70, 70, 70, 70, 70, 71, 71, 71, 71, 71, 71, 71,
+         71, 72, 72, 72, 72, 72, 72, 72, 72, 73, 73, 73, 73, 73, 73, 73, 73, 74, 74, 74, 74, 74, 74, 74, 74, 75, 75, 75, 75, 75, 75, 75,
+         75, 76, 76, 76, 76, 76, 76, 76, 76, 77, 77, 77, 77, 77, 77, 77, 77, 78, 78, 78, 78, 78, 78, 78, 78, 79, 79, 79, 79, 79, 79, 79,
+         79, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81,
+         81, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 83, 83, 83, 83, 83, 83, 83, 83, 83, 83, 83, 83, 83, 83, 83,
+         83, 84, 84, 84, 84, 84, 84, 84, 84, 84, 84, 84, 84, 84, 84, 84, 84, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85,
+         85, 86, 86, 86, 86, 86, 86, 86, 86, 86, 86, 86, 86, 86, 86, 86, 86, 87, 87, 87, 87, 87, 87, 87, 87, 87, 87, 87, 87, 87, 87, 87,
+         87, 88, 88, 88, 88, 88, 88, 88, 88, 88, 88, 88, 88, 88, 88, 88, 88, 89, 89, 89, 89, 89, 89, 89, 89, 89, 89, 89, 89, 89, 89, 89,
+         89, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 91, 91, 91, 91, 91, 91, 91, 91, 91, 91, 91, 91, 91, 91, 91,
+         91, 92, 92, 92, 92, 92, 92, 92, 92, 92, 92, 92, 92, 92, 92, 92, 92, 93, 93, 93, 93, 93, 93, 93, 93, 93, 93, 93, 93, 93, 93, 93,
+         93, 94, 94, 94, 94, 94, 94, 94, 94, 94, 94, 94, 94, 94, 94, 94, 94, 95, 95, 95, 95, 95, 95, 95, 95, 95, 95, 95, 95, 95, 95, 95,
+         95, 96, 96, 96, 96, 96, 96, 96, 96, 96, 96, 96, 96, 96, 96, 96, 96, 96, 96, 96, 96, 96, 96, 96, 96, 96, 96, 96, 96, 96, 96, 96,
+         96, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97,
+         97, 98, 98, 98, 98, 98, 98, 98, 98, 98, 98, 98, 98, 98, 98, 98, 98, 98, 98, 98, 98, 98, 98, 98, 98, 98, 98, 98, 98, 98, 98, 98,
+         98, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
+         99,100,100,100,100,100,100,100,100,100,100,100,100,100,100,100,100,100,100,100,100,100,100,100,100,100,100,100,100,100,100,100,
+        100,101,101,101,101,101,101,101,101,101,101,101,101,101,101,101,101,101,101,101,101,101,101,101,101,101,101,101,101,101,101,101,
+        101,102,102,102,102,102,102,102,102,102,102,102,102,102,102,102,102,102,102,102,102,102,102,102,102,102,102,102,102,102,102,102,
+        102,103,103,103,103,103,103,103,103,103,103,103,103,103,103,103,103,103,103,103,103,103,103,103,103,103,103,103,103,103,103,103,
+        103,104,104,104,104,104,104,104,104,104,104,104,104,104,104,104,104,104,104,104,104,104,104,104,104,104,104,104,104,104,104,104,
+        104,105,105,105,105,105,105,105,105,105,105,105,105,105,105,105,105,105,105,105,105,105,105,105,105,105,105,105,105,105,105,105,
+        105,106,106,106,106,106,106,106,106,106,106,106,106,106,106,106,106,106,106,106,106,106,106,106,106,106,106,106,106,106,106,106,
+        106,107,107,107,107,107,107,107,107,107,107,107,107,107,107,107,107,107,107,107,107,107,107,107,107,107,107,107,107,107,107,107,
+        107,108,108,108,108,108,108,108,108,108,108,108,108,108,108,108,108,108,108,108,108,108,108,108,108,108,108,108,108,108,108,108,
+        108,109,109,109,109,109,109,109,109,109,109,109,109,109,109,109,109,109,109,109,109,109,109,109,109,109,109,109,109,109,109,109,
+        109,110,110,110,110,110,110,110,110,110,110,110,110,110,110,110,110,110,110,110,110,110,110,110,110,110,110,110,110,110,110,110,
+        110,111,111,111,111,111,111,111,111,111,111,111,111,111,111,111,111,111,111,111,111,111,111,111,111,111,111,111,111,111,111,111,
+        111,112,112,112,112,112,112,112,112,112,112,112,112,112,112,112,112,112,112,112,112,112,112,112,112,112,112,112,112,112,112,112,
+        112,112,112,112,112,112,112,112,112,112,112,112,112,112,112,112,112,112,112,112,112,112,112,112,112,112,112,112,112,112,112,112,
+        112,113,113,113,113,113,113,113,113,113,113,113,113,113,113,113,113,113,113,113,113,113,113,113,113,113,113,113,113,113,113,113,
+        113,113,113,113,113,113,113,113,113,113,113,113,113,113,113,113,113,113,113,113,113,113,113,113,113,113,113,113,113,113,113,113,
+        113,114,114,114,114,114,114,114,114,114,114,114,114,114,114,114,114,114,114,114,114,114,114,114,114,114,114,114,114,114,114,114,
+        114,114,114,114,114,114,114,114,114,114,114,114,114,114,114,114,114,114,114,114,114,114,114,114,114,114,114,114,114,114,114,114,
+        114,115,115,115,115,115,115,115,115,115,115,115,115,115,115,115,115,115,115,115,115,115,115,115,115,115,115,115,115,115,115,115,
+        115,115,115,115,115,115,115,115,115,115,115,115,115,115,115,115,115,115,115,115,115,115,115,115,115,115,115,115,115,115,115,115,
+        115,116,116,116,116,116,116,116,116,116,116,116,116,116,116,116,116,116,116,116,116,116,116,116,116,116,116,116,116,116,116,116,
+        116,116,116,116,116,116,116,116,116,116,116,116,116,116,116,116,116,116,116,116,116,116,116,116,116,116,116,116,116,116,116,116,
+        116,117,117,117,117,117,117,117,117,117,117,117,117,117,117,117,117,117,117,117,117,117,117,117,117,117,117,117,117,117,117,117,
+        117,117,117,117,117,117,117,117,117,117,117,117,117,117,117,117,117,117,117,117,117,117,117,117,117,117,117,117,117,117,117,117,
+        117,118,118,118,118,118,118,118,118,118,118,118,118,118,118,118,118,118,118,118,118,118,118,118,118,118,118,118,118,118,118,118,
+        118,118,118,118,118,118,118,118,118,118,118,118,118,118,118,118,118,118,118,118,118,118,118,118,118,118,118,118,118,118,118,118,
+        118,119,119,119,119,119,119,119,119,119,119,119,119,119,119,119,119,119,119,119,119,119,119,119,119,119,119,119,119,119,119,119,
+        119,119,119,119,119,119,119,119,119,119,119,119,119,119,119,119,119,119,119,119,119,119,119,119,119,119,119,119,119,119,119,119,
+        119,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,
+        120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,
+        120,121,121,121,121,121,121,121,121,121,121,121,121,121,121,121,121,121,121,121,121,121,121,121,121,121,121,121,121,121,121,121,
+        121,121,121,121,121,121,121,121,121,121,121,121,121,121,121,121,121,121,121,121,121,121,121,121,121,121,121,121,121,121,121,121,
+        121,122,122,122,122,122,122,122,122,122,122,122,122,122,122,122,122,122,122,122,122,122,122,122,122,122,122,122,122,122,122,122,
+        122,122,122,122,122,122,122,122,122,122,122,122,122,122,122,122,122,122,122,122,122,122,122,122,122,122,122,122,122,122,122,122,
+        122,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,
+        123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,
+        123,124,124,124,124,124,124,124,124,124,124,124,124,124,124,124,124,124,124,124,124,124,124,124,124,124,124,124,124,124,124,124,
+        124,124,124,124,124,124,124,124,124,124,124,124,124,124,124,124,124,124,124,124,124,124,124,124,124,124,124,124,124,124,124,124,
+        124,125,125,125,125,125,125,125,125,125,125,125,125,125,125,125,125,125,125,125,125,125,125,125,125,125,125,125,125,125,125,125,
+        125,125,125,125,125,125,125,125,125,125,125,125,125,125,125,125,125,125,125,125,125,125,125,125,125,125,125,125,125,125,125,125,
+        125,126,126,126,126,126,126,126,126,126,126,126,126,126,126,126,126,126,126,126,126,126,126,126,126,126,126,126,126,126,126,126,
+        126,126,126,126,126,126,126,126,126,126,126,126,126,126,126,126,126,126,126,126,126,126,126,126,126,126,126,126,126,126,126,126,
+        126,127,127,127,127,127,127,127,127,127,127,127,127,127,127,127,127,127,127,127,127,127,127,127,127,127,127,127,127,127,127,127,
+        127,127,127,127,127,127,127,127,127,127,127,127,127,127,127,127,127,127,127,127,127,127,127,127,127,127,127,127,127,127,127,127,
     };
         
     template<typename LockType = NoLock>
@@ -676,16 +739,6 @@ namespace cachepool {
         MyPoolAlloc<bTreeFreeSegment> bTreeAlloc;
         phmap::btree_set<bTreeFreeSegment, FreeSegmentComparator, MyPoolAlloc<bTreeFreeSegment>> freeSegments;
         LockType lock;
-
-        size_t size_to_alloc_id(size_t size)
-        {
-            size -= 1;
-            if (size < 32)
-                return size;
-            int id = unsafe_int_log2(size);
-            id = (id - 3) * 16 + (size >> (id - 4) & 15);
-            return id;
-        }
 
         // The pointer given to free() might not point to the beginning of the segment. We have to search it.
         size_t scan_begin_of_segment(size_t blockIndex)
@@ -769,12 +822,12 @@ namespace cachepool {
         void deallocate_fixblock(void* allocPtr, size_t blockIndex)
         {
             VarBlockNode* node = blocks + blockIndex;
-            size_t sizeClass = node->suballocation.sizeClass;
 
             // The pool will become empty. Do not bother deallocating inside the pool, 
             // just destroy it and free its segment so it can be used by others.
             if (node->suballocation.pool.get_allocated_blocks() == 1) {
                 deallocate_varblock(blockIndex);
+                size_t sizeClass = ALLOCATION_SIZE_TO_SIZE_CLASS[node->suballocation.pool.get_block_size()];
                 // And remove from linked list...
                 if (suballocationHeads[sizeClass] == node)
                     suballocationHeads[sizeClass] = node->suballocation.next;
@@ -790,6 +843,7 @@ namespace cachepool {
 
             // If the pool was full, now it isn't. Put it in the list of available fixed pools.
             if (isFull) {
+                size_t sizeClass = ALLOCATION_SIZE_TO_SIZE_CLASS[node->suballocation.pool.get_block_size()];
                 node->suballocation.prev = nullptr;
                 node->suballocation.next = suballocationHeads[sizeClass];
                 if (suballocationHeads[sizeClass] != nullptr) 
@@ -816,7 +870,7 @@ namespace cachepool {
             if (suballocationHeads[sizeClass] != nullptr)
                 return allocate_fixblock_from_pool(sizeClass);
 
-            void* ptr = allocate_varblock(SIZE_CLASS_TO_SEGMENT[sizeClass]);
+            void* ptr = allocate_varblock(SIZE_CLASS_TO_SEGMENT_LENGTH[sizeClass]);
             if (!ptr) {
                 // We couldn't allocate a new pool for this size ID, but 
                 // maybe there is a bigger pool available?
@@ -831,8 +885,7 @@ namespace cachepool {
             VarBlockNode* node = (VarBlockNode*)ptr - 1;
 
             node->isSuballocation = true;
-            node->suballocation.sizeClass = sizeClass;
-            node->suballocation.pool.restart(SIZE_CLASS_TO_SIZE[sizeClass], SIZE_CLASS_TO_NUMBER_BLOCKS[sizeClass], (uint8_t*)ptr);
+            node->suballocation.pool.restart(SIZE_CLASS_TO_ALLOCATION_SIZE[sizeClass], SIZE_CLASS_TO_NUMBER_BLOCKS[sizeClass], (uint8_t*)ptr);
             // Add the pool to the free pool linked list
             suballocationHeads[sizeClass] = node;
             node->suballocation.next = nullptr;
@@ -922,7 +975,7 @@ namespace cachepool {
 
             void* ptr = nullptr;
             if (size < VAR_ALLOC_THRESHOLD) 
-                ptr = allocate_fixblock(size_to_alloc_id(size));
+                ptr = allocate_fixblock(ALLOCATION_SIZE_TO_SIZE_CLASS[size]);
             else {
                 size_t blocksRequested = (size + VAR_ALLOC_GRANULARITY - 1) / VAR_ALLOC_GRANULARITY;
                 ptr = allocate_varblock(blocksRequested);
