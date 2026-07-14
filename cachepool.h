@@ -25,7 +25,9 @@ with this file, You can obtain one at http://mozilla.org/MPL/2.0/.
 #include <cstdint>
 #include <new>
 #include <type_traits>
-#include "lib/parallel_hashmap/btree.h"
+#ifndef PHMAP_BTREE_BTREE_CONTAINER_H_
+    #include "lib/parallel_hashmap/btree.h"
+#endif
 
 #define IS_64BIT (UINTPTR_MAX > UINT32_MAX)
 
@@ -526,7 +528,6 @@ namespace cachepool {
         SuballocationPool pool;
         VarBlockNode* next;
         VarBlockNode* prev;
-        //uint8_t sizeClass;
     };
 
     struct VarBlockNode 
@@ -537,7 +538,6 @@ namespace cachepool {
         size_t isFree : 1;
         size_t previous : 63;
         SuballocationNode suballocation;
-        //uint8_t padding[8];
 #else
         size_t isSuballocation : 1;
         size_t length : 31;
@@ -897,9 +897,9 @@ namespace cachepool {
 
         VariableCachePool()
             : bTreeAlloc(&bTreeLeafPool, &bTreeInternalPool), freeSegments(FreeSegmentComparator(*this), bTreeAlloc) {}
-        VariableCachePool(size_t _numberBlocks)
+        VariableCachePool(size_t _poolSize)
             : bTreeAlloc(&bTreeLeafPool, &bTreeInternalPool), freeSegments(FreeSegmentComparator(*this), bTreeAlloc) {
-            restart(_numberBlocks);
+            restart(_poolSize);
         }
         ~VariableCachePool() {
             freeSegments.clear();
@@ -929,11 +929,11 @@ namespace cachepool {
             // Note that the segments also include a single header block!
             size_t maxFreeSegments = numberBlocks / ((MIN_SEGMENT_LENGTH + 1) * 2) + 1;
 
-            // A leaf node of the binary tree can hold up to 512 bytes of data. This includes space 
+            // A leaf node of the binary tree can hold up to 256 bytes of data. This includes space 
             // for 2 qwords or dwords for 64 or 32 bit architectures. So the number of elements per 
-            // leaf node is given by kNodeValues = (512 - sizeof(void*) * 2) / sizeof(ValueType), 
+            // leaf node is given by kNodeValues = (256 - sizeof(void*) * 2) / sizeof(ValueType), 
             // with a minimum value of 3. The size it occupies is kNodeValues * sizeof(ValueType) + sizeof(void*) * 2
-            int kNodeValues = (512 - sizeof(void*) * 2) / sizeof(bTreeFreeSegment);
+            int kNodeValues = (256 - sizeof(void*) * 2) / sizeof(bTreeFreeSegment);
             if (kNodeValues < 3)
                 kNodeValues = 3;
             int kLeafNodeSize = kNodeValues * sizeof(bTreeFreeSegment) + sizeof(void*) * 2;
